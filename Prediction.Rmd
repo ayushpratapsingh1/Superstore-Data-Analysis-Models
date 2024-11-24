@@ -1,0 +1,286 @@
+---
+title: "Sales Prediction"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+# Load required libraries
+library(flexdashboard)
+library(dplyr)
+library(lubridate)
+library(hms)
+library(ggplot2)
+library(naivebayes)
+library(tidyr)
+library(e1071)
+library(class)
+library(caret)
+library(cluster)
+library(rpart)
+library(stringr)
+
+# Read and preprocess data
+sales_data <- read.csv("Sales_data.csv")
+sales_data <- sales_data[-1]
+
+# Data preprocessing
+sales_data <- sales_data %>%
+  # Convert date and ensure numeric columns
+  mutate(
+    Date = mdy(Date),
+    across(c(Unit.price, Quantity, Tax.5., Total, cogs, 
+             gross.margin.percentage, gross.income, Rating), as.numeric)
+  ) %>%
+  # Remove duplicates
+  distinct() %>%
+  # Standardize text columns
+  mutate(across(c(City, Customer.type, Gender, Product.line, Payment), 
+                ~ str_to_title(.)))
+
+# Extract date components
+sales_data <- sales_data %>%
+  mutate(
+    Month = month(Date, label = TRUE),
+    Year = year(Date)
+  )
+
+# Process time data
+sales_data <- sales_data %>%
+  mutate(
+    Time = as.character(Time),
+    Time = ifelse(nchar(Time) == 5, paste0(Time, ":00"), Time),
+    Hour = as.numeric(substr(Time, 1, 2)),
+    TimeOfDay = case_when(
+      Hour >= 5 & Hour < 12 ~ "Morning",
+      Hour >= 12 & Hour < 16 ~ "Afternoon",
+      Hour >= 16 & Hour < 19 ~ "Evening",
+      TRUE ~ "Night"
+    )
+  )
+
+# Prepare data for modeling
+set.seed(123)
+sales_data$TotalCat <- cut(sales_data$Total,
+                          breaks = 3,
+                          labels = c("Low", "Medium", "High"))
+
+trainIndex <- createDataPartition(sales_data$TotalCat, p = 0.7, list = FALSE)
+train <- sales_data[trainIndex, ]
+test <- sales_data[-trainIndex, ]
+```
+
+Data Analysis
+=======================================================================
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### **Sales by Month and Year**
+
+```{r}
+ggplot(sales_data, aes(x = Month, y = Total, fill = as.factor(Year))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Sales by Month and Year",
+       x = "Month",
+       y = "Total Sales") +
+  theme_minimal()
+```
+
+### **Sales by Time of Day**
+
+```{r}
+ggplot(sales_data, aes(x = TimeOfDay, y = Total, fill = TimeOfDay)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sales by Time of Day",
+       x = "Time of Day",
+       y = "Total Sales") +
+  theme_minimal()
+```
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### **Sales by Gender**
+
+```{r}
+ggplot(sales_data, aes(x = Gender, y = Total, fill = Gender)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sales by Gender",
+       x = "Gender",
+       y = "Total Sales") +
+  theme_minimal()
+```
+
+### **Sales by Product Line**
+
+```{r}
+ggplot(sales_data, aes(x = substr(Product.line, 1, 6), 
+                       y = Total, 
+                       fill = Product.line)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sales by Product Line",
+       x = "Product Line",
+       y = "Total Sales") +
+  theme_minimal()
+```
+
+Confusion matrices {data-orientation=rows}
+=======================================================================
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### **Naive Bayes Model**
+
+```{r}
+nb_model <- naiveBayes(TotalCat ~ ., data = train %>% select(-Total))
+nb_pred <- predict(nb_model, test %>% select(-Total))
+nb_cm <- confusionMatrix(nb_pred, test$TotalCat)
+nb_accuracy <- nb_cm$overall['Accuracy']
+nb_precision <- mean(nb_cm$byClass['Pos Pred Value'], na.rm = TRUE)
+
+ggplot(as.data.frame(nb_cm$table), 
+       aes(x = Prediction, y = Reference, fill = Freq)) +
+  geom_tile(color = "black") +
+  labs(title = "Naive Bayes Confusion Matrix",
+       x = "Predicted",
+       y = "Actual") +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal()
+```
+
+### **Multiple Regression Model**
+
+```{r}
+lm_model <- lm(Total ~ TimeOfDay + Gender + Month + Year, data = train)
+lm_pred <- predict(lm_model, test)
+mean_total <- mean(test$Total)
+lm_pred_class <- ifelse(lm_pred > mean_total, 1, 0)
+actual_class <- ifelse(test$Total > mean_total, 1, 0)
+lm_cm <- confusionMatrix(as.factor(lm_pred_class), as.factor(actual_class))
+lm_accuracy <- lm_cm$overall['Accuracy']
+lm_precision <- lm_cm$byClass['Pos Pred Value']
+
+ggplot(as.data.frame(lm_cm$table), 
+       aes(Prediction, Reference, fill = Freq)) +
+  geom_tile(color = "black") +
+  labs(title = "Multiple Regression Confusion Matrix",
+       x = "Predicted",
+       y = "Actual") +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal()
+```
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### **SVM Model**
+
+```{r}
+svm_model <- svm(Total ~ TimeOfDay + Gender + Month + Year, data = train)
+svm_pred <- predict(svm_model, test)
+svm_pred_class <- ifelse(svm_pred > mean(test$Total), 1, 0)
+svm_cm <- confusionMatrix(as.factor(svm_pred_class), 
+                         as.factor(ifelse(test$Total > mean(test$Total), 1, 0)))
+svm_accuracy <- svm_cm$overall['Accuracy']
+svm_precision <- svm_cm$byClass['Pos Pred Value']
+
+ggplot(as.data.frame(svm_cm$table), 
+       aes(Prediction, Reference, fill = Freq)) +
+  geom_tile() +
+  labs(title = "SVM Confusion Matrix",
+       x = "Predicted",
+       y = "Actual") +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal()
+```
+
+### **K-means Clustering**
+
+```{r}
+set.seed(123)
+kmeans_model <- kmeans(scale(sales_data[, c("Unit.price", "Quantity", 
+                                           "Tax.5.", "Total")]), 
+                      centers = 2, 
+                      nstart = 20)
+kmeans_pred <- kmeans_model$cluster
+kmeans_cm <- confusionMatrix(as.factor(kmeans_pred), 
+                            as.factor(kmeans_model$cluster))
+kmeans_accuracy <- kmeans_cm$overall['Accuracy']
+kmeans_precision <- kmeans_cm$byClass['Pos Pred Value']
+
+ggplot(as.data.frame(kmeans_cm$table), 
+       aes(Prediction, Reference, fill = Freq)) +
+  geom_tile() +
+  labs(title = "K-means Confusion Matrix",
+       x = "Predicted",
+       y = "Actual") +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal()
+```
+
+Accuracy and Precision
+=======================================================================
+Column {data-width=600}
+-----------------------------------------------------------------------
+### **Model Performance Comparison**
+
+```{r}
+results <- data.frame(
+  Model = c("Naive Bayes", "Multiple Regression", "SVM", "K-means"),
+  Accuracy = c(nb_accuracy, lm_accuracy, svm_accuracy, kmeans_accuracy),
+  Precision = c(nb_precision, lm_precision, svm_precision, kmeans_precision)
+)
+
+results_long <- gather(results, key = "Metric", value = "Value", 
+                      Accuracy, Precision)
+
+ggplot(results_long, 
+       aes(x = Model, y = Value, color = Metric, group = Metric)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Model Accuracy & Precision Comparison",
+       x = "Model",
+       y = "Value") +
+  scale_color_manual(values = c("blue", "red")) +
+  theme_minimal() +  # You can replace this with your custom theme if needed
+  theme(
+    panel.border = element_rect(color = "#E5E9F0", fill = NA),  # Light border color
+    axis.text.x = element_text(angle = 0),  # No rotation for x-axis labels
+    axis.text.y = element_text(color = "#4E4D47"),  # Optional, customize y-axis labels' color
+    axis.title = element_text(size = 6),  # Optional, customize axis title size
+    plot.title = element_text(hjust = 0.5, size = 8)  # Center title with custom size
+  )
+
+```
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+### **Model Performance Summary**
+
+- **Naive Bayes**:
+  - **Accuracy**: 97%  
+    (High accuracy but potential class imbalance.)
+  - **Precision**: NaN  
+    (No positive class predictions or class imbalance; requires further investigation.)
+
+- **Multiple Regression**:
+  - **Accuracy**: 51.7%  
+    (Underperforming; may need a more complex model or feature engineering.)
+  - **Precision**: 62%  
+    (Moderate precision; improving but still room for better prediction of positive class.)
+
+- **SVM**:
+  - **Accuracy**: 60.1%  
+    (Moderate performance, but could benefit from hyperparameter tuning.)
+  - **Precision**: 60.1%  
+    (Balanced precision, but still needs improvement in identifying positive class.)
+
+- **K-means**:
+  - **Accuracy**: 100%  
+    (Perfect accuracy, but this might indicate overfitting or improper evaluation, as K-means is unsupervised.)
+  - **Precision**: 100%  
+    (Ideal precision, but may not be applicable in unsupervised tasks.)
